@@ -1,14 +1,18 @@
-# Economic Performance Indicators 2018=100
+# Real GDP, real investment, real wages, wage share and wage inequality
 # France, Germany, Greece, Portugal, Spain, Italy
 #
-# Data (Eurostat  public API, no key needed):
+# Data (all Eurostat, via the public API, no key needed):
 #   namq_10_gdp      quarterly national accounts: GDP, GFCF, compensation
-#                    of employees, household consumption
-#   namq_10_a10_e    quarterly national accounts employment: employees and
-#                    total employment
+#                    of employees
+#   namq_10_a10_e    quarterly national accounts employment: employees,
+#                    total employment and hours worked
+#   prc_hicp_minr    HICP, all items, monthly (ECOICOP ver. 2, 2025=100)
 #   earn_ses_hourly  Structure of Earnings Survey (4-yearly: 2014, 2018,
 #                    2022): first and ninth decile of gross hourly earnings
 
+# install.packages(c("eurostat", "dplyr", "tidyr", "ggplot2", "lubridate",
+#                    "remotes"))
+# remotes::install_github("jimjam-slam/ggflags")   # circular flags
 library(eurostat)
 library(ggflags)
 library(dplyr)
@@ -51,14 +55,14 @@ pick_adjustment <- function(d, ...) {
 
 # ---- 1. National accounts (Eurostat, quarterly) ----------------------------
 # B1GQ = GDP, P51G = gross fixed capital formation, D1 = compensation of
-# employees, P31_S14_S15 = household (+ NPISH) final consumption.
+# employees.
 # Current prices (CP_MEUR) and chain-linked volumes (reference year 2020,
 # or 2010 where Eurostat has not yet switched; the newer one is kept).
 na_raw <- suppressWarnings(get_eurostat(
   "namq_10_gdp",
   filters = list(
     geo     = names(countries),
-    na_item = c("B1GQ", "P51G", "D1", "P31_S14_S15"),
+    na_item = c("B1GQ", "P51G", "D1"),
     unit    = c("CP_MEUR", "CLV20_MEUR", "CLV10_MEUR"),
     s_adj   = c("SCA", "SA", "NSA")
   ),
@@ -97,6 +101,46 @@ bind_rows(
   pivot_wider(names_from = item, values_from = s_adj) |>
   print()
 
+# ---- 2b. Consumer prices (Eurostat HICP, monthly -> quarterly) -------------
+# Since January 2026 the HICP is published under ECOICOP ver. 2 in
+# prc_hicp_minr (all items = "TOTAL", index 2025 = 100); the older
+# prc_hicp_midx stops in December 2025.
+hicp_raw <- suppressWarnings(get_eurostat(
+  "prc_hicp_minr",
+  filters = list(geo = names(countries), coicop18 = "TOTAL", unit = "I25"),
+  time_format = "date", cache = FALSE
+)) |> fix_time()
+
+hicp_q <- hicp_raw |>
+  filter(!is.na(values)) |>
+  mutate(time = floor_date(time, "quarter")) |>
+  group_by(geo, time) |>
+  filter(n() == 3) |>                        # complete quarters only
+  summarise(hicp = mean(values), .groups = "drop")
+
+# The HICP is not seasonally adjusted, while compensation is. Remove the
+# (small) seasonal pattern with a ratio-to-moving-average: quarterly factors
+# are the average deviation of log HICP from its centred 4-quarter moving
+# average since 2010, normalised to sum to zero.
+seasonal <- hicp_q |>
+  group_by(geo) |>
+  arrange(time, .by_group = TRUE) |>
+  mutate(
+    trend = as.numeric(stats::filter(log(hicp), c(1, 2, 2, 2, 1) / 8, sides = 2)),
+    dev   = log(hicp) - trend,
+    q     = quarter(time)
+  ) |>
+  filter(year(time) >= 2010) |>
+  group_by(geo, q) |>
+  summarise(sf = mean(dev, na.rm = TRUE), .groups = "drop_last") |>
+  mutate(sf = sf - mean(sf)) |>
+  ungroup()
+
+hicp <- hicp_q |>
+  mutate(q = quarter(time)) |>
+  left_join(seasonal, by = c("geo", "q")) |>
+  transmute(geo, time, HICP = hicp * exp(-sf))
+
 # ---- 3. Derived quarterly indicators ---------------------------------------
 na <- na_sel |>
   transmute(geo, time, key = paste(na_item, price, sep = "_"), values) |>
@@ -110,6 +154,7 @@ index_2018 <- function(x, t) 100 * x / mean(x[year(t) == 2018], na.rm = TRUE)
 
 quarterly <- na |>
   left_join(emp, by = c("geo", "time")) |>
+  left_join(hicp, by = c("geo", "time")) |>
   group_by(geo) |>
   arrange(time, .by_group = TRUE) |>
   mutate(
@@ -117,10 +162,8 @@ quarterly <- na |>
     gfcf = index_2018(P51G_CLV, time),
     # real GDP per hour worked by all persons employed
     prod_hour = index_2018(B1GQ_CLV / EMP_DC_THS_HW, time),
-    # compensation per employee deflated by the household consumption deflator
-    real_wage = index_2018(
-      (D1_CP / SAL_DC_THS_PER) / (P31_S14_S15_CP / P31_S14_S15_CLV), time
-    ),
+    # compensation per employee deflated by the (seasonally adjusted) HICP
+    real_wage = index_2018((D1_CP / SAL_DC_THS_PER) / HICP, time),
     # adjusted wage share: imputes the average employee wage to the
     # self-employed (AMECO / European Commission definition)
     wage_share = 100 * (D1_CP / SAL_DC_THS_PER) * EMP_DC_THS_PER / B1GQ_CP
@@ -216,10 +259,41 @@ ends <- ends |>
 
 latest  <- max(df$time[df$series != "d9d1"])
 caption <- paste0(
-  "Sources: Eurostat (quarterly national accounts; ",
-  "Structure of Earnings Survey 2014, 2018, 2022).\n",
+  "Sources: Eurostat (quarterly national accounts (namq_10_gdp, namq_10_a10_e); ",
+  "HICP (prc_hicp_minr); ",
+  "Structure of Earnings Survey 2014, 2018, 2022 (earn_ses_hourly))\n",
+  "Real wages include social contributions. ",
   "Latest observation: Q", quarter(latest), " ", year(latest), "."
 )
+
+# Align the 100 line across the index panels (2018 = 100): give every
+# index panel a y range in which 100 sits at the same relative height.
+# Each range is the smallest one that still holds that panel's data and
+# flags; the common height is the average of the panels' own positions.
+index_series <- c("gdp", "gfcf", "prod_hour", "real_wage")
+
+span_100 <- bind_rows(
+  select(df, series, value),
+  transmute(ends, series, value = flag_y)
+) |>
+  filter(series %in% index_series) |>
+  group_by(series) |>
+  summarise(below = 100 - min(value), above = max(value) - 100)
+
+pos_100 <- with(span_100, mean(below / (below + above)))
+
+align_100 <- span_100 |>
+  mutate(
+    range = pmax(below / pos_100, above / (1 - pos_100)),
+    lo    = 100 - pos_100 * range,
+    hi    = 100 + (1 - pos_100) * range
+  ) |>
+  select(series, lo, hi) |>
+  pivot_longer(c(lo, hi), values_to = "value") |>
+  left_join(summarise(group_by(df, series), time = max(time)), by = "series") |>
+  mutate(panel = factor(panels[series], levels = panels))
+
+ref_100 <- tibble(panel = factor(panels[index_series], levels = panels))
 
 country_cols <- c(
   France   = "#1f3a93",
@@ -252,6 +326,10 @@ p <- ggplot(df, aes(time, value, colour = country)) +
   geom_line(linewidth = 0.9) +
   # the survey is 4-yearly, so mark the actual observations
   geom_point(data = filter(df, series == "d9d1"), size = 2) +
+  # 100 reference line and invisible range points that align it
+  geom_hline(data = ref_100, aes(yintercept = 100),
+             colour = "grey55", linewidth = 0.3) +
+  geom_blank(data = align_100, aes(time, value), inherit.aes = FALSE) +
   flag_layers +
   facet_wrap(~ panel, scales = "free", ncol = 3) +
   scale_x_date(
@@ -280,7 +358,7 @@ p <- ggplot(df, aes(time, value, colour = country)) +
 
 if (show_flags) {
   # draw to a file (no time limit), then display the PNG in the Viewer tab
-  out_png <- "202611-economicperformance-d1.png"
+  out_png <- "crisis_economies_wages.png"
   ggsave(out_png, p, width = 15, height = 9, dpi = 300, bg = "white")
   
   if (requireNamespace("rstudioapi", quietly = TRUE) &&
