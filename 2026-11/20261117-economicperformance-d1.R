@@ -266,7 +266,7 @@ p <- ggplot(df, aes(time, value, colour = country)) +
   theme_void() +
   theme(
     axis.text        = element_text(size = 10, margin = margin(3, 3, 3, 3)),
-    panel.grid.major.x = element_line(colour = "grey85", linewidth = 0.3),
+    panel.grid.major.y = element_line(colour = "grey85", linewidth = 0.3),
     strip.text       = element_text(size = 12, face = "bold",
                                     margin = margin(b = 8)),
     legend.position  = "top",
