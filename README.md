@@ -1,2 +1,2 @@
-# tidytuesday
-Codes and Plots for selected TidyTuesday Challenges
+# plots
+Assorted plots and corresponding codes, including selected tidytuesday submissions
