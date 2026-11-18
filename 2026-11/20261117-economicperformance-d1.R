@@ -331,7 +331,7 @@ p <- ggplot(df, aes(time, value, colour = country)) +
              colour = "grey55", linewidth = 0.3) +
   geom_blank(data = align_100, aes(time, value), inherit.aes = FALSE) +
   flag_layers +
-  facet_wrap(~ panel, scales = "free", ncol = 3) +
+  facet_wrap(~ panel, scales = "free_y", ncol = 3) +
   scale_x_date(
     breaks = seq(as.Date("2015-01-01"), as.Date("2025-01-01"), by = "2 years"),
     date_labels = "%Y",
